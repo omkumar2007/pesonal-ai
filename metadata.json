@@ -1,0 +1,6 @@
+{
+  "name": "Prithi",
+  "description": "Prithi is a friendly virtual girl companion who chats naturally, remembers your details, organizes reminders, and automates phone-like tasks.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
