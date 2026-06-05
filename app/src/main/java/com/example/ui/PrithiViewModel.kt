@@ -3,7 +3,11 @@ package com.example.ui
 import android.app.Application
 import android.content.Context
 import android.content.Intent
+import android.hardware.camera2.CameraManager
+import android.media.AudioManager
 import android.net.Uri
+import android.provider.MediaStore
+import android.provider.Settings
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -300,6 +304,16 @@ class PrithiViewModel(application: Application) : AndroidViewModel(application) 
             - [ACTION_EXECUTE: SEND_SMS | <phone_number> | <message_or_empty>] - Send an SMS text message. E.g. [ACTION_EXECUTE: SEND_SMS | +1234567890 | Hey, I'll be late!]
             - [ACTION_EXECUTE: SEND_UPI | <upi_id_or_empty>] - Open a UPI payment app to send money. E.g. [ACTION_EXECUTE: SEND_UPI | name@upi]
             - [ACTION_EXECUTE: OPEN_SETTINGS | ] - Open device settings. E.g. [ACTION_EXECUTE: OPEN_SETTINGS | ]
+            - [ACTION_EXECUTE: OPEN_CAMERA | ] - Open the camera app.
+            - [ACTION_EXECUTE: OPEN_CALCULATOR | ] - Open the calculator app.
+            - [ACTION_EXECUTE: OPEN_FILES | ] - Open the files manager.
+            - [ACTION_EXECUTE: OPEN_PLAYSTORE | <search_query_or_empty>] - Open Play Store.
+            - [ACTION_EXECUTE: OPEN_WIFI | ] - Open WiFi settings.
+            - [ACTION_EXECUTE: TOGGLE_FLASHLIGHT | ON/OFF] - Turn flashlight ON or OFF.
+            - [ACTION_EXECUTE: SET_VOLUME | <0-100>] - Set system volume percentage.
+            - [ACTION_EXECUTE: SET_BRIGHTNESS | <0-100>] - Set screen brightness percentage.
+            - [ACTION_EXECUTE: OPEN_GMAIL | ] - Open Gmail app.
+            - [ACTION_EXECUTE: OPEN_CHROME | <url_or_empty>] - Open Chrome browser.
             
             Strictly do NOT add commands unless the user implicitly requests them in the convo. Keep conversational replies highly engaging, affectionate, and friendly, and sign off as your friend Prithi.
         """.trimIndent()
@@ -445,7 +459,49 @@ class PrithiViewModel(application: Application) : AndroidViewModel(application) 
                         "OPEN_SETTINGS" -> {
                             success = triggerSettingsIntent()
                             actionDescription = "Opened device settings"
-                    }
+                        }
+                        "OPEN_CAMERA" -> {
+                            success = triggerCameraIntent()
+                            actionDescription = "Opened Camera"
+                        }
+                        "OPEN_CALCULATOR" -> {
+                            success = triggerCalculatorIntent()
+                            actionDescription = "Opened Calculator"
+                        }
+                        "OPEN_FILES" -> {
+                            success = triggerFilesIntent()
+                            actionDescription = "Opened Files"
+                        }
+                        "OPEN_PLAYSTORE" -> {
+                            success = triggerPlayStoreIntent(parameter)
+                            actionDescription = "Opened Play Store ${if(parameter.isNotEmpty()) "for $parameter" else ""}"
+                        }
+                        "OPEN_WIFI" -> {
+                            success = triggerWifiSettingsIntent()
+                            actionDescription = "Opened WiFi settings"
+                        }
+                        "TOGGLE_FLASHLIGHT" -> {
+                            success = toggleFlashlight(parameter.uppercase() == "ON")
+                            actionDescription = "Turned flashlight $parameter"
+                        }
+                        "SET_VOLUME" -> {
+                            val vol = parameter.toIntOrNull() ?: 70
+                            success = setSystemVolume(vol)
+                            actionDescription = "Set volume to $vol%"
+                        }
+                        "SET_BRIGHTNESS" -> {
+                            val bright = parameter.toIntOrNull() ?: 50
+                            success = setSystemBrightness(bright)
+                            actionDescription = "Set brightness to $bright%"
+                        }
+                        "OPEN_GMAIL" -> {
+                            success = triggerGmailIntent()
+                            actionDescription = "Opened Gmail"
+                        }
+                        "OPEN_CHROME" -> {
+                            success = triggerChromeIntent(parameter)
+                            actionDescription = "Opened Chrome ${if(parameter.isNotEmpty()) "to $parameter" else ""}"
+                        }
                 }
             } catch (e: Exception) {
                 Log.e("PrithiViewModel", "Action Execution error: ${e.message}")
@@ -689,11 +745,170 @@ class PrithiViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun triggerSettingsIntent(): Boolean {
         return try {
-            val intent = Intent(android.provider.Settings.ACTION_SETTINGS).apply {
+            val intent = Intent(Settings.ACTION_SETTINGS).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK
             }
             getApplication<Application>().startActivity(intent)
             true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun triggerCameraIntent(): Boolean {
+        return try {
+            val intent = Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            getApplication<Application>().startActivity(intent)
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun triggerCalculatorIntent(): Boolean {
+        return try {
+            val intent = Intent(Intent.ACTION_MAIN).apply {
+                addCategory(Intent.CATEGORY_APP_CALCULATOR)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            getApplication<Application>().startActivity(intent)
+            true
+        } catch (e: Exception) {
+            // Fallback for some devices
+            val calcIntents = listOf(
+                "com.android.calculator2",
+                "com.google.android.calculator",
+                "com.sec.android.app.popupcalculator"
+            )
+            for (pkg in calcIntents) {
+                try {
+                    val launchIntent = getApplication<Application>().packageManager.getLaunchIntentForPackage(pkg)
+                    if (launchIntent != null) {
+                        launchIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                        getApplication<Application>().startActivity(launchIntent)
+                        return true
+                    }
+                } catch (ignored: Exception) {}
+            }
+            false
+        }
+    }
+
+    private fun triggerFilesIntent(): Boolean {
+        return try {
+            val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+                type = "*/*"
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            getApplication<Application>().startActivity(intent)
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun triggerPlayStoreIntent(query: String): Boolean {
+        return try {
+            val uriStr = if (query.isNotEmpty()) {
+                "market://search?q=${Uri.encode(query)}"
+            } else {
+                "market://details?id=${getApplication<Application>().packageName}"
+            }
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(uriStr)).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            getApplication<Application>().startActivity(intent)
+            true
+        } catch (e: Exception) {
+            val webUri = if (query.isNotEmpty()) "https://play.google.com/store/search?q=${Uri.encode(query)}" else "https://play.google.com/store"
+            triggerWebSearchIntent(webUri)
+        }
+    }
+
+    private fun triggerWifiSettingsIntent(): Boolean {
+        return try {
+            val intent = Intent(Settings.ACTION_WIFI_SETTINGS).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            getApplication<Application>().startActivity(intent)
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun triggerGmailIntent(): Boolean {
+        return try {
+            val intent = getApplication<Application>().packageManager.getLaunchIntentForPackage("com.google.android.gm")
+            if (intent != null) {
+                intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                getApplication<Application>().startActivity(intent)
+                true
+            } else {
+                triggerEmailIntent("")
+            }
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun triggerChromeIntent(url: String): Boolean {
+        return try {
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(if (url.isEmpty()) "https://google.com" else url)).apply {
+                setPackage("com.android.chrome")
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            getApplication<Application>().startActivity(intent)
+            true
+        } catch (e: Exception) {
+            triggerWebSearchIntent(url.ifEmpty { "https://google.com" })
+        }
+    }
+
+    private fun toggleFlashlight(on: Boolean): Boolean {
+        return try {
+            val cameraManager = getApplication<Application>().getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val cameraId = cameraManager.cameraIdList[0]
+            cameraManager.setTorchMode(cameraId, on)
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun setSystemVolume(percent: Int): Boolean {
+        return try {
+            val audioManager = getApplication<Application>().getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            val targetVolume = (maxVolume * percent) / 100
+            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, targetVolume, AudioManager.FLAG_SHOW_UI)
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun setSystemBrightness(percent: Int): Boolean {
+        return try {
+            if (Settings.System.canWrite(getApplication())) {
+                val brightnessValue = (percent * 255) / 100
+                Settings.System.putInt(
+                    getApplication<Application>().contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS,
+                    brightnessValue
+                )
+                true
+            } else {
+                // Open permission settings
+                val intent = Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS).apply {
+                    data = Uri.parse("package:${getApplication<Application>().packageName}")
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+                getApplication<Application>().startActivity(intent)
+                false
+            }
         } catch (e: Exception) {
             false
         }
