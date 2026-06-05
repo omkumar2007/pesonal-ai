@@ -53,6 +53,14 @@ import com.example.ui.theme.*
 import java.text.SimpleDateFormat
 import java.util.*
 
+// Shadowing the theme variables locally for the Sky & Sea Blue Theme
+private val SpaceBackground = Color(0xFF001F3F) // Deep Sea Blue
+private val SpaceCardSurface = Color(0xFF003366) // Ocean Blue
+private val SpaceCardOverlay = Color(0xFF004080) // Light Sea Blue
+private val PrithiPrimaryLavender = Color(0xFF87CEEB) // Sky Blue
+private val PrithiSecondaryFuchsia = Color(0xFF00BFFF) // Bright Sky Blue
+private val PrithiPinkAccent = Color(0xFF00FFFF) // Cyan Accent
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PrithiMainScreen(viewModel: PrithiViewModel) {
@@ -62,7 +70,9 @@ fun PrithiMainScreen(viewModel: PrithiViewModel) {
     val isAnalyzing by viewModel.isAnalyzing.collectAsStateWithLifecycle()
     val isListening by viewModel.isListening.collectAsStateWithLifecycle()
     val isTtsEnabled by viewModel.isTtsEnabled.collectAsStateWithLifecycle()
+    val currentLanguage by viewModel.currentLanguage.collectAsStateWithLifecycle()
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
+    val isWakeWordMode by viewModel.isWakeWordMode.collectAsStateWithLifecycle()
 
     // Microphone Permission Request
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -154,6 +164,13 @@ fun PrithiMainScreen(viewModel: PrithiViewModel) {
                             modifier = Modifier.background(SpaceCardSurface)
                         ) {
                             DropdownMenuItem(
+                                text = { Text("Language: ${if (currentLanguage == "ta") "தமிழ்" else "English"}", color = Color.White) },
+                                onClick = {
+                                    viewModel.toggleLanguage()
+                                    showResetMenu = false
+                                }
+                            )
+                            DropdownMenuItem(
                                 text = { Text("Clear Chat History", color = Color.White) },
                                 onClick = {
                                     viewModel.clearHistory()
@@ -171,6 +188,13 @@ fun PrithiMainScreen(viewModel: PrithiViewModel) {
                                 text = { Text("Clear Automation Logs", color = Color.White) },
                                 onClick = {
                                     viewModel.clearAutomationLogs()
+                                    showResetMenu = false
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(if (isWakeWordMode) "Disable 'Hey Prithi' Hotword" else "Enable 'Hey Prithi' Hotword", color = Color.White) },
+                                onClick = {
+                                    viewModel.toggleWakeWordMode()
                                     showResetMenu = false
                                 }
                             )
@@ -292,7 +316,7 @@ fun PrithiMainScreen(viewModel: PrithiViewModel) {
                     0 -> CompanionChatTab(
                         viewModel = viewModel,
                         isListening = isListening,
-                        onMicClicked = {
+                        onOrbClicked = {
                             permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                         }
                     )
@@ -311,7 +335,7 @@ fun PrithiMainScreen(viewModel: PrithiViewModel) {
 fun CompanionChatTab(
     viewModel: PrithiViewModel,
     isListening: Boolean,
-    onMicClicked: () -> Unit
+    onOrbClicked: () -> Unit
 ) {
     val messages by viewModel.chatHistory.collectAsStateWithLifecycle()
     val isAnalyzing by viewModel.isAnalyzing.collectAsStateWithLifecycle()
@@ -337,7 +361,14 @@ fun CompanionChatTab(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(130.dp),
+                .height(280.dp) // Made orb larger for 80% voice focus
+                .clickable {
+                    if (isListening) {
+                        viewModel.stopVoiceListening()
+                    } else {
+                        onOrbClicked()
+                    }
+                },
             contentAlignment = Alignment.Center
         ) {
             PrithiGlowOrb(emotion = prithiEmotion, isThinking = isAnalyzing)
@@ -365,17 +396,10 @@ fun CompanionChatTab(
                     )
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
-                        text = "Say hello to Prithi!",
+                        text = "Touch the orb to talk to Prithi!",
                         color = Color.LightGray,
                         fontSize = 15.sp,
                         fontWeight = FontWeight.SemiBold
-                    )
-                    Text(
-                        text = "She will introduce herself and start building a real friendship with you.",
-                        color = Color.Gray,
-                        fontSize = 12.sp,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.padding(horizontal = 12.dp)
                     )
                 }
             } else {
@@ -397,7 +421,7 @@ fun CompanionChatTab(
             }
         }
 
-        // Input Tray Area
+        // Input Tray Area (Mic icon removed as per request)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -405,37 +429,11 @@ fun CompanionChatTab(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // Voice Input Trigger
-            Box(
-                modifier = Modifier
-                    .size(52.dp)
-                    .clip(CircleShape)
-                    .background(
-                        if (isListening) PrithiPinkAccent else PrithiPrimaryLavender
-                    )
-                    .clickable {
-                        if (isListening) {
-                            viewModel.stopVoiceListening()
-                        } else {
-                            onMicClicked()
-                        }
-                    }
-                    .testTag("record_voice_button"),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = if (isListening) Icons.Default.Close else Icons.Default.Mic,
-                    contentDescription = "Toggle Speech Recognition",
-                    tint = SpaceBackground,
-                    modifier = Modifier.size(24.dp)
-                )
-            }
-
             // Keyboard/Text entry
             OutlinedTextField(
                 value = currentInputText,
                 onValueChange = { viewModel.updateInputText(it) },
-                placeholder = { Text("Talk to Prithi...", color = Color.Gray, fontSize = 14.sp) },
+                placeholder = { Text("Type something to Prithi...", color = Color.Gray, fontSize = 14.sp) },
                 modifier = Modifier
                     .weight(1f)
                     .testTag("chat_input_field"),
@@ -504,11 +502,11 @@ fun PrithiGlowOrb(emotion: String, isThinking: Boolean) {
     )
 
     val color = when (emotion) {
-        "LISTENING" -> Color(0xFF00FFCC) // cyan of active listening
-        "THINKING" -> Color(0xFFFFCC00) // yellow thinking light
-        "SPEAKING" -> PrithiPinkAccent // pink active voice output
-        "WAVE" -> PrithiPrimaryLavender // lavender wave hello
-        "SLEEPING" -> Color(0x99A080FF) // dim sleeping indigo
+        "LISTENING" -> PrithiPinkAccent
+        "THINKING" -> Color(0xFF87CEFA)
+        "SPEAKING" -> PrithiSecondaryFuchsia
+        "WAVE" -> PrithiPrimaryLavender
+        "SLEEPING" -> Color(0x99002244)
         else -> PrithiPrimaryLavender
     }
 
@@ -517,7 +515,7 @@ fun PrithiGlowOrb(emotion: String, isThinking: Boolean) {
         modifier = Modifier.fillMaxSize()
     ) {
         // Pulse circles behind
-        Canvas(modifier = Modifier.size(90.dp)) {
+        Canvas(modifier = Modifier.size(160.dp)) {
             val radius = size.minDimension / 1.8f
             drawCircle(
                 color = color.copy(alpha = alphaScale * 0.15f),
@@ -536,16 +534,16 @@ fun PrithiGlowOrb(emotion: String, isThinking: Boolean) {
         // Small informative state caption printed in subtle details
         Text(
             text = when (emotion) {
-                "LISTENING" -> "I'm listening..."
+                "LISTENING" -> "Listening... Speak in English"
                 "THINKING" -> "Prithi is thinking..."
-                "SPEAKING" -> "I'm speaking!"
+                "SPEAKING" -> "Speaking in Tamil..."
                 "WAVE" -> "Hello!"
-                else -> ""
+                else -> "Touch Orb to Talk"
             },
             color = color.copy(alpha = 0.8f),
-            fontSize = 11.sp,
+            fontSize = 14.sp,
             fontWeight = FontWeight.Bold,
-            modifier = Modifier.offset(y = 52.dp)
+            modifier = Modifier.offset(y = 100.dp)
         )
     }
 }
@@ -557,7 +555,7 @@ fun ChatBubble(message: ChatMessage) {
     val bgColors = if (isUser) {
         Brush.horizontalGradient(listOf(SpaceCardOverlay, SpaceCardSurface))
     } else {
-        Brush.horizontalGradient(listOf(Color(0xFF281F4B), SpaceCardOverlay))
+        Brush.horizontalGradient(listOf(Color(0xFF002244), SpaceCardOverlay))
     }
     val borderColor = if (isUser) PrithiSecondaryFuchsia.copy(alpha = 0.5f) else PrithiPrimaryLavender.copy(alpha = 0.4f)
     val alignCorner = if (isUser) RoundedCornerShape(18.dp, 18.dp, 2.dp, 18.dp) else RoundedCornerShape(18.dp, 18.dp, 18.dp, 2.dp)

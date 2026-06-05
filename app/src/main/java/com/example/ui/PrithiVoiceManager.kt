@@ -3,6 +3,8 @@ package com.example.ui
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -19,6 +21,9 @@ class PrithiVoiceManager(
     private var speechRecognizer: SpeechRecognizer? = null
     private var isTtsInitialized = false
     private var isListening = false
+    private var isWakeWordListening = false
+    private var currentLanguage: String = "ta"
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     init {
         // Initialize Text To Speech
@@ -26,6 +31,17 @@ class PrithiVoiceManager(
             tts = TextToSpeech(context, this)
         } catch (e: Exception) {
             Log.e("PrithiVoiceManager", "Error initializing TTS: ${e.message}")
+        }
+    }
+
+    fun updateLanguage(language: String) {
+        currentLanguage = language
+        if (isTtsInitialized) {
+            val locale = when (language) {
+                "ta" -> Locale("ta", "IN")
+                else -> Locale.US
+            }
+            tts?.language = locale
         }
     }
 
@@ -55,8 +71,11 @@ class PrithiVoiceManager(
                 if (!voices.isNullOrEmpty()) {
                     val bestVoice = voices.filter { 
                         it.locale?.language == "ta" 
-                    }.minByOrNull { 
-                        if (it.isNetworkConnectionRequired) 1 else 0 
+                    }.maxByOrNull { 
+                        var score = 0
+                        if (it.name.contains("female", ignoreCase = true)) score += 10
+                        if (it.isNetworkConnectionRequired) score += 5 // Network voices sound more human
+                        score
                     }
                     if (bestVoice != null) {
                         tts?.voice = bestVoice
@@ -75,9 +94,9 @@ class PrithiVoiceManager(
 
     private fun cleanTextForSpeech(text: String): String {
         // 1. Strip Action and URL tags
-        var cleaned = text.replace(Regex("\\[ACTION_EXECUTE:[^\\]]*\\]"), "")
+        var cleaned = text.replace(Regex("\\[ACTION_EXECUTE:[^]]*]"), "")
         cleaned = cleaned.replace(Regex("https?://\\S+"), "")
-        cleaned = cleaned.replace(Regex("[\\*\\_\\#\\`]+"), "")
+        cleaned = cleaned.replace(Regex("[*_#`]+"), "")
 
         // 2. Filter out Emojis & other miscellaneous non-speaking symbols
         val sb = StringBuilder()
@@ -132,6 +151,7 @@ class PrithiVoiceManager(
             return
         }
 
+        speechRecognizer?.destroy()
         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
             setRecognitionListener(object : RecognitionListener {
                 override fun onReadyForSpeech(params: Bundle?) {
@@ -181,8 +201,10 @@ class PrithiVoiceManager(
 
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ta-IN")
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "ta-IN")
+            // Voice command is always in English as requested
+            val language = "en-US"
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, language)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
         }
 
@@ -200,6 +222,58 @@ class PrithiVoiceManager(
             speechRecognizer?.stopListening()
             isListening = false
         }
+    }
+
+    fun startWakeWordListening(onWakeWordDetected: () -> Unit) {
+        if (!isTtsInitialized || isListening) return
+        isWakeWordListening = true
+
+        speechRecognizer?.destroy()
+        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
+            setRecognitionListener(object : RecognitionListener {
+                override fun onReadyForSpeech(params: Bundle?) {}
+                override fun onBeginningOfSpeech() {}
+                override fun onRmsChanged(rmsdB: Float) {}
+                override fun onBufferReceived(buffer: ByteArray?) {}
+                override fun onEndOfSpeech() {}
+                override fun onError(error: Int) {
+                    if (isWakeWordListening) {
+                        mainHandler.postDelayed({
+                            if (isWakeWordListening) startWakeWordListening(onWakeWordDetected)
+                        }, 2000)
+                    }
+                }
+                override fun onResults(results: Bundle?) {
+                    val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    val text = matches?.getOrNull(0)?.lowercase() ?: ""
+                    if (text.contains("hey prithi") || text.contains("hi prithi") || text.contains("hey pretty")) {
+                        isWakeWordListening = false
+                        onWakeWordDetected()
+                    } else if (isWakeWordListening) {
+                        startWakeWordListening(onWakeWordDetected)
+                    }
+                }
+                override fun onPartialResults(partialResults: Bundle?) {}
+                override fun onEvent(eventType: Int, params: Bundle?) {}
+            })
+        }
+
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US") // English hotword matching is more robust
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+        }
+
+        try {
+            speechRecognizer?.startListening(intent)
+        } catch (e: Exception) {
+            isWakeWordListening = false
+        }
+    }
+
+    fun stopWakeWordListening() {
+        isWakeWordListening = false
+        speechRecognizer?.cancel()
     }
 
     fun onDestroy() {

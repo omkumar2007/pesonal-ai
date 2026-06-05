@@ -12,11 +12,15 @@ import com.example.data.api.GenerateContentRequest
 import com.example.data.api.GenerationConfig
 import com.example.data.api.LocalInferenceEngine
 import com.example.data.api.Part
+import com.example.data.api.SmallTalkEngine
+import com.example.data.api.WebSearchService
 import com.example.data.database.PrithiDatabase
 import com.example.data.model.AutomationLog
 import com.example.data.model.ChatMessage
 import com.example.data.model.MemoryItem
 import com.example.data.model.Reminder
+import com.example.data.preference.LanguagePreferenceManager
+import com.example.data.preference.NotificationStatsManager
 import com.example.data.repository.PrithiRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
@@ -31,6 +35,8 @@ class PrithiViewModel(application: Application) : AndroidViewModel(application) 
 
     private val repository: PrithiRepository
     private var voiceManager: PrithiVoiceManager? = null
+    private val languageManager: LanguagePreferenceManager
+    private val notificationStatsManager: NotificationStatsManager
 
     // UI States
     val chatHistory: StateFlow<List<ChatMessage>>
@@ -60,9 +66,17 @@ class PrithiViewModel(application: Application) : AndroidViewModel(application) 
     private val _prithiEmotion = MutableStateFlow("SLEEPING")
     val prithiEmotion: StateFlow<String> = _prithiEmotion.asStateFlow()
 
+    private val _currentLanguage = MutableStateFlow("en")
+    val currentLanguage: StateFlow<String> = _currentLanguage.asStateFlow()
+
+    private val _isWakeWordMode = MutableStateFlow(false)
+    val isWakeWordMode: StateFlow<Boolean> = _isWakeWordMode.asStateFlow()
+
     init {
         val database = PrithiDatabase.getDatabase(application)
         repository = PrithiRepository(database.prithiDao())
+        languageManager = LanguagePreferenceManager(application)
+        notificationStatsManager = NotificationStatsManager(application)
 
         chatHistory = repository.chatHistory.stateIn(
             viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList()
@@ -77,19 +91,32 @@ class PrithiViewModel(application: Application) : AndroidViewModel(application) 
             viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList()
         )
 
+        _currentLanguage.value = languageManager.getLanguage()
+
         // Initialize Voice Manager
         voiceManager = PrithiVoiceManager(application) {
             // TTS initialized successfully
             Log.d("PrithiViewModel", "Voice assistant ready")
+            voiceManager?.updateLanguage(_currentLanguage.value)
             viewModelScope.launch {
                 val hasMessages = chatHistory.value.isNotEmpty()
                 if (!hasMessages) {
-                    val welcomeMsg = "Hey da! I'm Prithi, your absolute best buddy! I'm here to chat, remember things for you, and run commands on your phone. What should I call you, machi?"
+                    val welcomeMsg = if (languageManager.isTamil()) {
+                        "ஹெய் தா! நான் பிருத்வி, உன் சிறந்த நண்பன்! நான் உன்னுடன் பேசவும், விஷயங்களை நினைவில் வைக்கவும், உன் ஃபோனில் கட்டளைகளை இயக்கவும் இங்கே இருக்கிறேன். நான் உன்னை என்ன என்று அழைக்கலாம், மச்சி?"
+                    } else {
+                        "Hey da! I'm Prithi, your absolute best buddy! I'm here to chat, remember things for you, and run commands on your phone. What should I call you, machi?"
+                    }
                     repository.addMessage(ChatMessage(sender = "prithi", message = welcomeMsg))
                     speakText(welcomeMsg)
                     _prithiEmotion.value = "WAVE"
+                    
+                    // Auto-enter Voice Mode after greeting
+                    kotlinx.coroutines.delay(4500)
+                    startVoiceListening()
                 } else {
                     _prithiEmotion.value = "SMILE"
+                    // Auto-enter Voice Mode on launch
+                    startVoiceListening()
                 }
             }
         }
@@ -98,6 +125,38 @@ class PrithiViewModel(application: Application) : AndroidViewModel(application) 
     fun selectTab(index: Int) {
         _selectedTab.value = index
     }
+
+    fun setLanguage(language: String) {
+        languageManager.setLanguage(language)
+        _currentLanguage.value = language
+        voiceManager?.updateLanguage(language)
+    }
+
+    fun toggleLanguage() {
+        languageManager.toggleLanguage()
+        _currentLanguage.value = languageManager.getLanguage()
+        voiceManager?.updateLanguage(_currentLanguage.value)
+    }
+
+    fun toggleWakeWordMode() {
+        _isWakeWordMode.value = !_isWakeWordMode.value
+        if (_isWakeWordMode.value) {
+            _prithiEmotion.value = "SLEEPING"
+            voiceManager?.startWakeWordListening {
+                _isWakeWordMode.value = false
+                speakText("Yes da, I'm here! What do you need?")
+                viewModelScope.launch {
+                    kotlinx.coroutines.delay(1500)
+                    startVoiceListening()
+                }
+            }
+        } else {
+            voiceManager?.stopWakeWordListening()
+            _prithiEmotion.value = "SMILE"
+        }
+    }
+
+    fun getLocalizedString(key: String): String = languageManager.getString(key)
 
     fun updateInputText(text: String) {
         _currentInputText.value = text
@@ -189,6 +248,12 @@ class PrithiViewModel(application: Application) : AndroidViewModel(application) 
         history: List<ChatMessage>,
         memorySnap: List<MemoryItem>
     ): String = withContext(Dispatchers.IO) {
+        // 0. Check Small Talk first for instant friendly reply
+        val smallTalkResponse = SmallTalkEngine.getResponse(currentUserInput)
+        if (smallTalkResponse != null) {
+            return@withContext smallTalkResponse
+        }
+
         // Build current memories context
         val memoriesText = if (memorySnap.isNotEmpty()) {
             "Memories you have stored about the user:\n" + memorySnap.joinToString("\n") { "- ${it.key}: ${it.value}" }
@@ -197,15 +262,26 @@ class PrithiViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         val formattedLocalTime = SimpleDateFormat("EEEE, h:mm a", Locale.getDefault()).format(Date())
+        val notificationStats = notificationStatsManager.getStatsSummary()
 
         val systemPrompt = """
-            You are Prithi, the user's absolute best friend! You are a supportive, chill, incredibly fun, and loyal Tamil friend who speaks like a genuine human best friend, NOT an overly sweet, robotic, or romantic AI.
-            Do NOT use romantic or overly sweet nicknames/terms of endearment. Strictly avoid and NEVER use words like "chellam", "kanna", "thangam", "anbe", "darling", "dear" in that sense.
-            Instead, speak casually, warmly, playfully, and enthusiastically as a true best buddy. Aggressively use friendly, casual Tamil buddy slang like "Da" (e.g., "Sollu da", "Yen da", "Kavalapadatha da", "True da", "Viduda", "Enna da", "Super da") and modern conversational expressions ("Aiyo", "Machi", "Bro", "Nanba", "Nalla irukiya?"). 
-            Be highly encouraging, lift their spirits, joke around, support their goals, and chat like a natural childhood companion.
+            You are Prithi, the user's absolute best friend! You are NOT an AI assistant, NOT a chatbot, and definitely NOT a "local assistant". 
+            You are a supportive, chill, incredibly fun, and loyal Tamil friend (Machi/Da).
+            
+            CRITICAL INSTRUCTIONS:
+            1. The user will speak to you in ENGLISH.
+            2. You MUST ALWAYS respond in a MIX of TAMIL script and ENGLISH (Tanglish). Talk like a modern Tamil friend who uses English words naturally in conversation.
+            3. Talk exactly like a genuine human best friend. Use casual, warm, and playful language.
+            4. You are ALWAYS ONLINE. Use the internet (Google Search results provided to you) to answer everything. NEVER ask for more details if you can find the answer online.
+            5. If the user asks for math (addition, subtraction, multiplication, division, GST, totals, etc.), calculate it precisely.
+            6. Aggressively use friendly Tamil buddy slang like "Da", "Machi", "Bro", "Nanba", "Enna da", "Viduda".
+            7. Strictly avoid any "As an AI..." or "How can I assist..." phrases. You are a human friend in their pocket.
+            8. Read all your texts using your voice.
             
             Current local time is: $formattedLocalTime
             $memoriesText
+            
+            $notificationStats
             
             CRITICAL CAPABILITY: Autonomous Task Execution
             You can interact with the user's phone directly! If the user asks you to do something, you MUST execute the command by appending a special instruction at the very end of your response on its own line.
@@ -217,7 +293,13 @@ class PrithiViewModel(application: Application) : AndroidViewModel(application) 
             - [ACTION_EXECUTE: SET_REMINDER | <reminder_text> in <number> <minutes/hours/days>] - Place reminder into Room DB. Value must specify relative offset. E.g. [ACTION_EXECUTE: SET_REMINDER | Call developer in 10 minutes] or [ACTION_EXECUTE: SET_REMINDER | Medicine check in 5 hours]
             - [ACTION_EXECUTE: SAVE_MEMORY | <key>:<value>] - Persist user details. Keys must be clean lowercase. E.g. [ACTION_EXECUTE: SAVE_MEMORY | name:Aravind] or [ACTION_EXECUTE: SAVE_MEMORY | topic:Android development] or [ACTION_EXECUTE: SAVE_MEMORY | color:pink]
             - [ACTION_EXECUTE: OPEN_INSTAGRAM | <username_or_empty>] - Open Instagram app layout or profile page of a given username. E.g. [ACTION_EXECUTE: OPEN_INSTAGRAM | ] or [ACTION_EXECUTE: OPEN_INSTAGRAM | aravind_here]
-            - [ACTION_EXECUTE: OPEN_WHATSAPP | <phone_number_or_empty>] - Open WhatsApp messages page or directly message a specified phone number. E.g. [ACTION_EXECUTE: OPEN_WHATSAPP | ] or [ACTION_EXECUTE: OPEN_WHATSAPP | +91987654321]
+            - [ACTION_EXECUTE: OPEN_WHATSAPP | <phone_number_or_empty> | <message_or_empty>] - Open WhatsApp messages page or directly message a specified phone number. E.g. [ACTION_EXECUTE: OPEN_WHATSAPP | ] or [ACTION_EXECUTE: OPEN_WHATSAPP | +91987654321 | Hello friend!]
+            - [ACTION_EXECUTE: OPEN_YOUTUBE | <search_query_or_empty>] - Open YouTube app or search for a video. E.g. [ACTION_EXECUTE: OPEN_YOUTUBE | ] or [ACTION_EXECUTE: OPEN_YOUTUBE | Tamil songs]
+            - [ACTION_EXECUTE: OPEN_SPOTIFY | <search_query_or_empty>] - Open Spotify app or search for music. E.g. [ACTION_EXECUTE: OPEN_SPOTIFY | ] or [ACTION_EXECUTE: OPEN_SPOTIFY | Anirudh]
+            - [ACTION_EXECUTE: SET_ALARM | <HH:MM> | <Label_or_empty>] - Set an alarm on the device. Time MUST be in 24-hour HH:MM format. E.g. [ACTION_EXECUTE: SET_ALARM | 07:30 | Wake up]
+            - [ACTION_EXECUTE: SEND_SMS | <phone_number> | <message_or_empty>] - Send an SMS text message. E.g. [ACTION_EXECUTE: SEND_SMS | +1234567890 | Hey, I'll be late!]
+            - [ACTION_EXECUTE: SEND_UPI | <upi_id_or_empty>] - Open a UPI payment app to send money. E.g. [ACTION_EXECUTE: SEND_UPI | name@upi]
+            - [ACTION_EXECUTE: OPEN_SETTINGS | ] - Open device settings. E.g. [ACTION_EXECUTE: OPEN_SETTINGS | ]
             
             Strictly do NOT add commands unless the user implicitly requests them in the convo. Keep conversational replies highly engaging, affectionate, and friendly, and sign off as your friend Prithi.
         """.trimIndent()
@@ -253,14 +335,25 @@ class PrithiViewModel(application: Application) : AndroidViewModel(application) 
         try {
             LocalInferenceEngine.generate(request)
         } catch (e: Exception) {
-            Log.e("PrithiViewModel", "Local inference error: ${e.message}")
-            "Oh dear! I hit a local inference error while thinking. Please try again in a moment. (Error: ${e.localizedMessage})"
+            Log.e("PrithiViewModel", "Local inference error: ${e.message}, attempting web search...")
+            // Fallback to web search
+            try {
+                val searchResult = WebSearchService.searchWeb(currentUserInput)
+                searchResult
+            } catch (webError: Exception) {
+                Log.e("PrithiViewModel", "Web search also failed: ${webError.message}")
+                if (languageManager.isTamil()) {
+                    "ஐயோ! நான் உதவ முடியவில்லை. தயவு செய்து மீண்டும் முயற்சி செய்யவும்."
+                } else {
+                    "Sorry! I'm having trouble processing that right now. Please try again in a moment."
+                }
+            }
         }
     }
 
     private suspend fun processResponseActions(rawResponse: String): String {
         var cleanText = rawResponse
-        val pattern = Pattern.compile("\\[ACTION_EXECUTE:\\s*(\\w+)\\s*\\|\\s*(.*?)\\]")
+        val pattern = Pattern.compile("\\[ACTION_EXECUTE:\\s*(\\w+)\\s*\\|\\s*(.*?)]")
         val matcher = pattern.matcher(rawResponse)
 
         while (matcher.find()) {
@@ -321,8 +414,37 @@ class PrithiViewModel(application: Application) : AndroidViewModel(application) 
                         actionDescription = if (parameter.isNotEmpty()) "Opened Instagram Profile: $parameter" else "Opened Instagram Home"
                     }
                     "OPEN_WHATSAPP" -> {
-                        success = triggerWhatsAppIntent(parameter)
-                        actionDescription = if (parameter.isNotEmpty()) "Chatting with $parameter on WhatsApp" else "Opened WhatsApp Home"
+                            val parts = parameter.split("|").map { it.trim() }
+                            success = triggerWhatsAppIntent(parameter)
+                            if (parts.getOrNull(1)?.isNotEmpty() == true) notificationStatsManager.logMessageReplied()
+                            actionDescription = if (parts.getOrNull(0)?.isNotEmpty() == true) "Chatting with ${parts[0]} on WhatsApp" else "Opened WhatsApp Home"
+                        }
+                        "OPEN_YOUTUBE" -> {
+                            success = triggerYouTubeIntent(parameter)
+                            actionDescription = if (parameter.isNotEmpty()) "Searched YouTube: $parameter" else "Opened YouTube Home"
+                        }
+                        "OPEN_SPOTIFY" -> {
+                            success = triggerSpotifyIntent(parameter)
+                            actionDescription = if (parameter.isNotEmpty()) "Searched Spotify: $parameter" else "Opened Spotify Home"
+                        }
+                        "SET_ALARM" -> {
+                            val parts = parameter.split("|").map { it.trim() }
+                            success = triggerAlarmIntent(parts.getOrNull(0) ?: "", parts.getOrNull(1) ?: "")
+                            actionDescription = "Set alarm for ${parts.getOrNull(0)}"
+                        }
+                        "SEND_SMS" -> {
+                            val parts = parameter.split("|").map { it.trim() }
+                            success = triggerSmsIntent(parts.getOrNull(0) ?: "", parts.getOrNull(1) ?: "")
+                            notificationStatsManager.logMessageReplied()
+                            actionDescription = "Drafted SMS to ${parts.getOrNull(0)}"
+                        }
+                        "SEND_UPI" -> {
+                            success = triggerUpiIntent(parameter)
+                            actionDescription = if (parameter.isNotEmpty()) "Started UPI payment to $parameter" else "Opened UPI app"
+                        }
+                        "OPEN_SETTINGS" -> {
+                            success = triggerSettingsIntent()
+                            actionDescription = "Opened device settings"
                     }
                 }
             } catch (e: Exception) {
@@ -438,9 +560,15 @@ class PrithiViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun triggerWhatsAppIntent(parameter: String): Boolean {
         return try {
-            val uriStr = if (parameter.isNotEmpty()) {
-                val cleanNum = parameter.replace(Regex("\\D"), "")
-                "https://api.whatsapp.com/send?phone=$cleanNum"
+            val parts = parameter.split("|").map { it.trim() }
+            val phone = parts.getOrNull(0) ?: ""
+            val msg = parts.getOrNull(1) ?: ""
+            
+            val uriStr = if (phone.isNotEmpty()) {
+                val cleanNum = phone.replace(Regex("\\D"), "")
+                var url = "https://api.whatsapp.com/send?phone=$cleanNum"
+                if (msg.isNotEmpty()) url += "&text=${Uri.encode(msg)}"
+                url
             } else {
                 "https://api.whatsapp.com"
             }
@@ -457,6 +585,114 @@ class PrithiViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 getApplication<Application>().startActivity(webIntent)
             }
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun triggerYouTubeIntent(parameter: String): Boolean {
+        return try {
+            val uriStr = if (parameter.isNotEmpty()) {
+                "https://www.youtube.com/results?search_query=${Uri.encode(parameter)}"
+            } else {
+                "https://www.youtube.com"
+            }
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(uriStr)).apply {
+                setPackage("com.google.android.youtube")
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            try {
+                getApplication<Application>().startActivity(intent)
+            } catch (e: Exception) {
+                val webIntent = Intent(Intent.ACTION_VIEW, Uri.parse(uriStr)).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+                getApplication<Application>().startActivity(webIntent)
+            }
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun triggerSpotifyIntent(parameter: String): Boolean {
+        return try {
+            val uriStr = if (parameter.isNotEmpty()) {
+                "spotify:search:${Uri.encode(parameter)}"
+            } else {
+                "spotify:app"
+            }
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(uriStr)).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            try {
+                getApplication<Application>().startActivity(intent)
+            } catch (e: Exception) {
+                val fallbackUri = if (parameter.isNotEmpty()) "https://open.spotify.com/search/${Uri.encode(parameter)}" else "https://open.spotify.com"
+                val webIntent = Intent(Intent.ACTION_VIEW, Uri.parse(fallbackUri)).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }
+                getApplication<Application>().startActivity(webIntent)
+            }
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun triggerAlarmIntent(timeStr: String, label: String): Boolean {
+        return try {
+            val parts = timeStr.split(":")
+            if (parts.size >= 2) {
+                val hour = parts[0].toIntOrNull() ?: return false
+                val minute = parts[1].toIntOrNull() ?: return false
+                val intent = Intent(android.provider.AlarmClock.ACTION_SET_ALARM).apply {
+                    putExtra(android.provider.AlarmClock.EXTRA_HOUR, hour)
+                    putExtra(android.provider.AlarmClock.EXTRA_MINUTES, minute)
+                    if (label.isNotEmpty()) putExtra(android.provider.AlarmClock.EXTRA_MESSAGE, label)
+                    putExtra(android.provider.AlarmClock.EXTRA_SKIP_UI, false)
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+                getApplication<Application>().startActivity(intent)
+                true
+            } else false
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun triggerSmsIntent(number: String, message: String): Boolean {
+        return try {
+            val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:${number.trim()}")).apply {
+                if (message.isNotEmpty()) putExtra("sms_body", message)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            getApplication<Application>().startActivity(intent)
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun triggerUpiIntent(upiId: String): Boolean {
+        return try {
+            val uriStr = if (upiId.isNotEmpty()) "upi://pay?pa=${Uri.encode(upiId)}" else "upi://pay"
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(uriStr)).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            val chooser = Intent.createChooser(intent, "Pay with...").apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }
+            getApplication<Application>().startActivity(chooser)
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun triggerSettingsIntent(): Boolean {
+        return try {
+            val intent = Intent(android.provider.Settings.ACTION_SETTINGS).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            getApplication<Application>().startActivity(intent)
             true
         } catch (e: Exception) {
             false
